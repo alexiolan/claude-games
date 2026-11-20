@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Арканоид</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #070912; overflow: hidden; touch-action: none; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, "Segoe UI", sans-serif; }
+  canvas { display: block; border-radius: 8px; box-shadow: 0 0 50px rgba(90, 130, 255, .25); cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+const W = 800, H = 600, HUD = 44;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+function resize() {
+  const s = Math.min(innerWidth / W, innerHeight / H) * 0.96;
+  const dpr = window.devicePixelRatio || 1;
+  cv.style.width = W * s + 'px';
+  cv.style.height = H * s + 'px';
+  cv.width = Math.round(W * s * dpr);
+  cv.height = Math.round(H * s * dpr);
+  ctx.setTransform(cv.width / W, 0, 0, cv.height / H, 0, 0);
+}
+addEventListener('resize', resize);
+resize();
+
+/* ---------- Звук ---------- */
+let actx = null;
+function initAudio() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  } else if (actx.state === 'suspended') actx.resume();
+}
+function sound(freq, dur = 0.07, type = 'square', vol = 0.06) {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(actx.destination);
+  o.start(t);
+  o.stop(t + dur);
+}
+
+/* ---------- Уровни ---------- */
+// . — пусто, 1-3 — прочность, # — неразрушимый
+const LEVELS = [
+  [
+    "............",
+    "111111111111",
+    "111111111111",
+    "222222222222",
+    "111111111111",
+    "111111111111",
+  ],
+  [
+    ".....11.....",
+    "....1221....",
+    "...123321...",
+    "..12333321..",
+    ".1222222221.",
+    "111111111111",
+  ],
+  [
+    "333333333333",
+    "#..........#",
+    "2.22.22.22.2",
+    "2.22.22.22.2",
+    "#..........#",
+    "111111111111",
+  ],
+  [
+    "1.2.3.3.2.1.",
+    ".1.2.3.3.2.1",
+    "1.2.3.3.2.1.",
+    ".1.2.3.3.2.1",
+    "1.2.3.3.2.1.",
+    "###.####.###",
+  ],
+  [
+    "222222222222",
+    "3###....###3",
+    "333333333333",
+    "1..........1",
+    "1.33.33.33.1",
+    "1.33.33.33.1",
+    "111111111111",
+  ],
+];
+const COLS = 12, SIDE = 40, GAP = 4, TOP = 74, BH = 22;
+const BW = (W - SIDE * 2 - GAP * (COLS - 1)) / COLS;
+const ROW_COLORS = ['#ff5d73', '#ff9f43', '#ffd93d', '#6bcb77', '#4dc9ff', '#7b8cff', '#c77dff'];
+
+const POWERUPS = {
+  E: { color: '#4dc9ff', name: 'Шире' },
+  S: { color: '#ffd93d', name: 'Медленнее' },
+  M: { color: '#c77dff', name: 'Мультишар' },
+  L: { color: '#ff5d73', name: '+1 жизнь' },
+};
+
+/* ---------- Состояние ---------- */
+let state = 'menu';          // menu | serve | play | paused | clear | over | win
+let score = 0, lives = 3, level = 0, clearT = 0;
+let best = 0;
+try { best = +localStorage.getItem('arkanoid_best') || 0; } catch (e) {}
+let paddle = null, balls = [], bricks = [], caps = [], parts = [], timers = { wide: 0, slow: 0 };
+let toast = null;
+const keys = {};
+
+function baseSpeed() { return 380 + level * 30; }
+
+function addScore(n) {
+  score += n;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('arkanoid_best', best); } catch (e) {}
+  }
+}
+
+function newGame() {
+  score = 0; lives = 3; level = 0;
+  loadLevel();
+}
+
+function loadLevel() {
+  bricks = [];
+  LEVELS[level].forEach((row, r) => {
+    [...row].forEach((ch, c) => {
+      if (ch === '.') return;
+      const hp = ch === '#' ? Infinity : +ch;
+      bricks.push({
+        x: SIDE + c * (BW + GAP), y: TOP + r * (BH + GAP), w: BW, h: BH,
+        hp, max: hp, color: ROW_COLORS[r % ROW_COLORS.length], flash: 0,
+      });
+    });
+  });
+  parts = [];
+  resetServe();
+}
+
+function resetServe() {
+  paddle = { x: paddle ? paddle.x : W / 2, y: H - 36, w: 110, h: 14 };
+  balls = [{ x: paddle.x, y: paddle.y - 7, r: 7, dx: 0, dy: -1, speed: baseSpeed(), stuck: true, off: 0 }];
+  caps = [];
+  timers = { wide: 0, slow: 0 };
+  state = 'serve';
+}
+
+function launch() {
+  for (const b of balls) {
+    if (!b.stuck) continue;
+    const a = (Math.random() - 0.5) * 0.6;
+    b.dx = Math.sin(a); b.dy = -Math.cos(a);
+    b.stuck = false;
+  }
+  state = 'play';
+  sound(660, 0.08, 'triangle');
+}
+
+function action() {
+  initAudio();
+  if (state === 'menu' || state === 'over' || state === 'win') { newGame(); }
+  else if (state === 'serve') launch();
+  else if (state === 'paused') state = 'play';
+}
+
+function togglePause() {
+  if (state === 'play') state = 'paused';
+  else if (state === 'paused') state = 'play';
+}
+
+/* ---------- Ввод ---------- */
+function pointerTo(clientX) {
+  if (!paddle) return;
+  const r = cv.getBoundingClientRect();
+  paddle.x = (clientX - r.left) / r.width * W;
+}
+addEventListener('mousemove', e => pointerTo(e.clientX));
+cv.addEventListener('mousedown', e => { e.preventDefault(); action(); });
+cv.addEventListener('touchstart', e => { e.preventDefault(); pointerTo(e.touches[0].clientX); action(); }, { passive: false });
+cv.addEventListener('touchmove', e => { e.preventDefault(); pointerTo(e.touches[0].clientX); }, { passive: false });
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); action(); }
+  if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play') state = 'paused'; });
+
+/* ---------- Логика ---------- */
+function burst(x, y, color, n = 14) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 60 + Math.random() * 220;
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5 + Math.random() * 0.4, max: 0.9, color, size: 2 + Math.random() * 3 });
+  }
+}
+
+function hitBrick(k, b) {
+  k.flash = 1;
+  if (k.hp === Infinity) { sound(1200, 0.05, 'square', 0.04); return; }
+  k.hp--;
+  b.speed = Math.min(b.speed + 4, 720);
+  if (k.hp <= 0) {
+    addScore(50 * k.max * (level + 1));
+    burst(k.x + k.w / 2, k.y + k.h / 2, k.color);
+    sound(500 + Math.random() * 300, 0.06);
+    if (Math.random() < 0.16) {
+      const types = ['E', 'E', 'S', 'M', 'M', 'L'];
+      caps.push({ x: k.x + k.w / 2, y: k.y + k.h / 2, type: types[Math.random() * types.length | 0], t: 0 });
+    }
+  } else {
+    addScore(10);
+    sound(350, 0.05);
+  }
+}
+
+function stepBall(b, dist) {
+  const n = Math.max(1, Math.ceil(dist / 4));
+  const s = dist / n;
+  for (let i = 0; i < n; i++) {
+    b.x += b.dx * s;
+    b.y += b.dy * s;
+
+    // стены
+    if (b.x < b.r) { b.x = b.r; b.dx = Math.abs(b.dx); sound(260, 0.03); }
+    if (b.x > W - b.r) { b.x = W - b.r; b.dx = -Math.abs(b.dx); sound(260, 0.03); }
+    if (b.y < HUD + b.r) { b.y = HUD + b.r; b.dy = Math.abs(b.dy); sound(260, 0.03); }
+    if (b.y > H + b.r * 2) { b.dead = true; return; }
+
+    // ракетка
+    const p = paddle, px = p.x - p.w / 2;
+    if (b.dy > 0 && b.y + b.r >= p.y && b.y < p.y + p.h / 2 &&
+        b.x + b.r >= px && b.x - b.r <= px + p.w) {
+      const hit = Math.max(-1, Math.min(1, (b.x - p.x) / (p.w / 2)));
+      const a = hit * Math.PI / 3;
+      b.dx = Math.sin(a); b.dy = -Math.cos(a);
+      b.y = p.y - b.r;
+      sound(440, 0.05, 'triangle');
+    }
+
+    // кирпичи
+    for (const k of bricks) {
+      if (k.hp <= 0) continue;
+      const cx = Math.max(k.x, Math.min(b.x, k.x + k.w));
+      const cy = Math.max(k.y, Math.min(b.y, k.y + k.h));
+      const ddx = b.x - cx, ddy = b.y - cy;
+      if (ddx * ddx + ddy * ddy <= b.r * b.r) {
+        const mx = k.x + k.w / 2, my = k.y + k.h / 2;
+        const ox = (k.w / 2 + b.r) - Math.abs(b.x - mx);
+        const oy = (k.h / 2 + b.r) - Math.abs(b.y - my);
+        if (ox < oy) {
+          const sgn = b.x < mx ? -1 : 1;
+          b.dx = sgn * Math.abs(b.dx); b.x += sgn * ox;
+        } else {
+          const sgn = b.y < my ? -1 : 1;
+          b.dy = sgn * Math.abs(b.dy); b.y += sgn * oy;
+        }
+        hitBrick(k, b);
+        break;
+      }
+    }
+  }
+}
+
+function applyPower(type) {
+  toast = { text: POWERUPS[type].name, color: POWERUPS[type].color, t: 1.4 };
+  sound(880, 0.12, 'triangle', 0.08);
+  addScore(100);
+  if (type === 'E') timers.wide = 15;
+  if (type === 'S') timers.slow = 10;
+  if (type === 'L') lives = Math.min(lives + 1, 6);
+  if (type === 'M') {
+    const add = [];
+    for (const b of balls) {
+      if (b.stuck) continue;
+      for (const da of [-0.45, 0.45]) {
+        if (balls.length + add.length >= 15) break;
+        // угол от вертикали в направлении полёта; ограничиваем, чтобы шар не летел почти горизонтально
+        let a = Math.atan2(b.dx, Math.abs(b.dy)) + da;
+        a = Math.max(-1.1, Math.min(1.1, a));
+        add.push({ ...b, dx: Math.sin(a), dy: Math.cos(a) * Math.sign(b.dy || -1) });
+      }
+    }
+    balls.push(...add);
+  }
+}
+
+function update(dt) {
+  for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 400 * dt; p.life -= dt; }
+  parts = parts.filter(p => p.life > 0);
+  for (const k of bricks) k.flash = Math.max(0, k.flash - dt * 5);
+  if (toast) { toast.t -= dt; if (toast.t <= 0) toast = null; }
+
+  if (state === 'clear') {
+    clearT -= dt;
+    if (clearT <= 0) {
+      level++;
+      if (level >= LEVELS.length) { state = 'win'; sound(1046, 0.4, 'triangle', 0.08); }
+      else loadLevel();
+    }
+    return;
+  }
+  if (state !== 'play' && state !== 'serve') return;
+
+  // ракетка
+  const dir = (keys.ArrowRight || keys.KeyD ? 1 : 0) - (keys.ArrowLeft || keys.KeyA ? 1 : 0);
+  paddle.x += dir * 650 * dt;
+  timers.wide = Math.max(0, timers.wide - dt);
+  timers.slow = Math.max(0, timers.slow - dt);
+  const targetW = timers.wide > 0 ? 170 : 110;
+  paddle.w += (targetW - paddle.w) * Math.min(1, dt * 10);
+  paddle.x = Math.max(paddle.w / 2, Math.min(W - paddle.w / 2, paddle.x));
+
+  const mult = timers.slow > 0 ? 0.65 : 1;
+  for (const b of balls) {
+    if (b.stuck) { b.x = paddle.x + b.off; b.y = paddle.y - b.r; continue; }
+    stepBall(b, b.speed * mult * dt);
+  }
+  bricks = bricks.filter(k => k.hp > 0);
+  balls = balls.filter(b => !b.dead);
+
+  // бонусы
+  for (const c of caps) {
+    c.y += 150 * dt; c.t += dt;
+    if (c.y + 8 >= paddle.y && c.y - 8 <= paddle.y + paddle.h &&
+        c.x + 18 >= paddle.x - paddle.w / 2 && c.x - 18 <= paddle.x + paddle.w / 2) {
+      c.got = true;
+      applyPower(c.type);
+    }
+  }
+  caps = caps.filter(c => !c.got && c.y < H + 20);
+
+  if (balls.length === 0) {
+    lives--;
+    sound(140, 0.35, 'sawtooth', 0.07);
+    if (lives <= 0) { state = 'over'; }
+    else resetServe();
+    return;
+  }
+
+  if (!bricks.some(k => k.hp !== Infinity)) {
+    addScore(500 * (level + 1));
+    state = 'clear';
+    clearT = 1.8;
+    caps = [];
+    sound(784, 0.25, 'triangle', 0.08);
+  }
+}
+
+/* ---------- Отрисовка ---------- */
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#141a36');
+  g.addColorStop(1, '#0a0d1c');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(120,140,255,0.05)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += 40) { ctx.moveTo(x + .5, HUD); ctx.lineTo(x + .5, H); }
+  for (let y = HUD; y <= H; y += 40) { ctx.moveTo(0, y + .5); ctx.lineTo(W, y + .5); }
+  ctx.stroke();
+}
+
+function drawHUD() {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, 0, W, HUD);
+  ctx.fillStyle = 'rgba(120,140,255,0.3)';
+  ctx.fillRect(0, HUD - 1, W, 1);
+  ctx.font = '600 16px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8a93c9'; ctx.fillText('СЧЁТ', 16, HUD / 2);
+  ctx.fillStyle = '#fff'; ctx.fillText(score.toLocaleString('ru-RU'), 70, HUD / 2);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#8a93c9'; ctx.fillText('УРОВЕНЬ', W / 2 - 20, HUD / 2);
+  ctx.fillStyle = '#fff'; ctx.fillText(`${Math.min(level + 1, LEVELS.length)}/${LEVELS.length}`, W / 2 + 46, HUD / 2);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff'; ctx.fillText(best.toLocaleString('ru-RU'), W - 16, HUD / 2);
+  const bw = ctx.measureText(best.toLocaleString('ru-RU')).width;
+  ctx.fillStyle = '#8a93c9'; ctx.fillText('РЕКОРД', W - 24 - bw, HUD / 2);
+  // жизни
+  for (let i = 0; i < lives; i++) {
+    ctx.fillStyle = '#4dc9ff';
+    rr(165 + i * 24, HUD / 2 - 4, 18, 8, 4);
+    ctx.fill();
+  }
+  // активные эффекты
+  let ex = 560;
+  ctx.font = '600 12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (const [key, t] of [['E', timers.wide], ['S', timers.slow]]) {
+    if (t <= 0 || (state !== 'play' && state !== 'serve' && state !== 'paused')) continue;
+    ctx.fillStyle = POWERUPS[key].color;
+    ctx.globalAlpha = t < 3 && (t * 6 | 0) % 2 ? 0.35 : 1;
+    ctx.fillText(`${key} ${Math.ceil(t)}`, ex, HUD / 2);
+    ctx.globalAlpha = 1;
+    ex -= 40;
+  }
+}
+
+function drawBricks() {
+  for (const k of bricks) {
+    if (k.hp === Infinity) {
+      const g = ctx.createLinearGradient(0, k.y, 0, k.y + k.h);
+      g.addColorStop(0, '#c9cfdf'); g.addColorStop(0.5, '#7d8499'); g.addColorStop(1, '#545a6c');
+      ctx.fillStyle = g;
+    } else {
+      const g = ctx.createLinearGradient(0, k.y, 0, k.y + k.h);
+      g.addColorStop(0, k.color);
+      g.addColorStop(1, shade(k.color, -0.35));
+      ctx.fillStyle = g;
+    }
+    rr(k.x, k.y, k.w, k.h, 4);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(k.x + 4, k.y + 3, k.w - 8, 2);
+    if (k.max > 1 && k.max !== Infinity) {
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      for (let i = 0; i < k.hp; i++) {
+        ctx.beginPath();
+        ctx.arc(k.x + k.w / 2 + (i - (k.hp - 1) / 2) * 9, k.y + k.h / 2 + 1, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    if (k.flash > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${k.flash * 0.7})`;
+      rr(k.x, k.y, k.w, k.h, 4);
+      ctx.fill();
+    }
+  }
+}
+
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  r = Math.round(r * (1 + f)); g = Math.round(g * (1 + f)); b = Math.round(b * (1 + f));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawPaddle() {
+  const p = paddle, x = p.x - p.w / 2;
+  ctx.shadowColor = '#4dc9ff'; ctx.shadowBlur = 16;
+  const g = ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
+  g.addColorStop(0, '#bff0ff'); g.addColorStop(1, '#2a8fd6');
+  ctx.fillStyle = g;
+  rr(x, p.y, p.w, p.h, p.h / 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ff5d73';
+  rr(x + 2, p.y + 2, 12, p.h - 4, 4); ctx.fill();
+  rr(x + p.w - 14, p.y + 2, 12, p.h - 4, 4); ctx.fill();
+}
+
+function drawBalls() {
+  ctx.shadowColor = '#fff'; ctx.shadowBlur = 14;
+  ctx.fillStyle = '#fff';
+  for (const b of balls) {
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+function drawCaps() {
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const c of caps) {
+    const pu = POWERUPS[c.type];
+    ctx.shadowColor = pu.color; ctx.shadowBlur = 10;
+    ctx.fillStyle = pu.color;
+    rr(c.x - 18, c.y - 8, 36, 16, 8); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(c.x - 12, c.y - 6, 24, 2);
+    ctx.fillStyle = '#10142a';
+    ctx.fillText(c.type, c.x, c.y + 1);
+  }
+}
+
+function drawParticles() {
+  for (const p of parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function overlay(title, lines, color = '#fff') {
+  ctx.fillStyle = 'rgba(5,7,16,0.65)';
+  ctx.fillRect(0, HUD, W, H - HUD);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = color; ctx.shadowBlur = 24;
+  ctx.fillStyle = color;
+  ctx.font = '800 56px system-ui, sans-serif';
+  ctx.fillText(title, W / 2, H / 2 - 50);
+  ctx.shadowBlur = 0;
+  ctx.font = '500 18px system-ui, sans-serif';
+  ctx.fillStyle = '#c9d0f5';
+  lines.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 + 10 + i * 30));
+}
+
+function hint(text) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = '500 18px system-ui, sans-serif';
+  ctx.fillStyle = `rgba(201,208,245,${0.55 + 0.45 * Math.sin(performance.now() / 300)})`;
+  ctx.fillText(text, W / 2, H - 90);
+}
+
+function draw() {
+  drawBackground();
+  drawBricks();
+  drawCaps();
+  drawParticles();
+  drawPaddle();
+  drawBalls();
+  drawHUD();
+
+  if (toast) {
+    ctx.globalAlpha = Math.min(1, toast.t * 2);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '700 22px system-ui, sans-serif';
+    ctx.fillStyle = toast.color;
+    ctx.fillText(toast.text, W / 2, H - 130 - (1.4 - toast.t) * 20);
+    ctx.globalAlpha = 1;
+  }
+
+  if (state === 'menu') {
+    overlay('АРКАНОИД', [
+      'Мышь, пальцем или ← → / A D — двигать ракетку',
+      'Клик, тап или Пробел — запустить шар · P / Esc — пауза',
+      'Бонусы:  E — шире   S — медленнее   M — мультишар   L — жизнь',
+      '',
+      'Нажмите, чтобы начать',
+    ], '#4dc9ff');
+  } else if (state === 'serve') {
+    hint('Клик / Пробел — запуск');
+  } else if (state === 'paused') {
+    overlay('ПАУЗА', ['Клик, Пробел или P — продолжить']);
+  } else if (state === 'clear') {
+    overlay('УРОВЕНЬ ПРОЙДЕН', [`Бонус: ${(500 * (level + 1)).toLocaleString('ru-RU')}`], '#6bcb77');
+  } else if (state === 'over') {
+    overlay('ИГРА ОКОНЧЕНА', [`Счёт: ${score.toLocaleString('ru-RU')}   Рекорд: ${best.toLocaleString('ru-RU')}`, '', 'Нажмите, чтобы сыграть ещё'], '#ff5d73');
+  } else if (state === 'win') {
+    overlay('ПОБЕДА!', [`Все уровни пройдены. Счёт: ${score.toLocaleString('ru-RU')}`, '', 'Нажмите, чтобы сыграть ещё'], '#ffd93d');
+  }
+}
+
+/* ---------- Цикл ---------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+loadLevel();
+state = 'menu';
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

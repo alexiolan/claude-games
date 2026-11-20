@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сапёр</title>
+<style>
+  :root {
+    --bg: #1e2230;
+    --panel: #2a2f42;
+    --cell: #3b4260;
+    --cell-hover: #4a5276;
+    --open: #d9dce6;
+    --text: #e8eaf2;
+    --accent: #f2b84b;
+    --size: 32px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    user-select: none; -webkit-user-select: none;
+    padding: 20px 10px;
+  }
+  h1 { margin: 0 0 14px; font-size: 28px; letter-spacing: 1px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 12px; }
+  button.level {
+    background: var(--panel); color: var(--text); border: 1px solid #444b66;
+    padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  button.level.active { background: var(--accent); color: #222; border-color: var(--accent); font-weight: 600; }
+  .game { background: var(--panel); padding: 14px; border-radius: 14px; box-shadow: 0 10px 30px rgba(0,0,0,.4); max-width: 100%; }
+  .status {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 12px; gap: 12px;
+  }
+  .counter {
+    font-family: "Courier New", monospace; font-size: 24px; font-weight: bold;
+    background: #11141d; color: #ff5d5d; padding: 4px 10px; border-radius: 6px; min-width: 76px; text-align: center;
+  }
+  #face {
+    font-size: 26px; width: 46px; height: 46px; border-radius: 50%;
+    border: none; background: var(--cell); cursor: pointer; line-height: 1;
+  }
+  #face:hover { background: var(--cell-hover); }
+  .board-wrap { overflow: auto; max-width: calc(100vw - 48px); }
+  #board { display: grid; gap: 2px; width: max-content; }
+  .cell {
+    width: var(--size); height: var(--size);
+    background: var(--cell); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: calc(var(--size) * 0.55); cursor: pointer;
+    transition: background .08s;
+  }
+  .cell:not(.open):hover { background: var(--cell-hover); }
+  .cell.open { background: var(--open); cursor: default; }
+  .cell.mine { background: #e85c5c; }
+  .cell.boom { background: #ff2e2e; box-shadow: inset 0 0 0 2px #fff; }
+  .cell.wrong { background: #8a6d6d; }
+  .n1 { color: #2563eb; } .n2 { color: #16a34a; } .n3 { color: #dc2626; } .n4 { color: #7c3aed; }
+  .n5 { color: #b45309; } .n6 { color: #0891b2; } .n7 { color: #111; } .n8 { color: #6b7280; }
+  .custom { display: none; gap: 8px; align-items: center; justify-content: center; margin-bottom: 12px; flex-wrap: wrap; font-size: 14px; }
+  .custom.show { display: flex; }
+  .custom input { width: 60px; padding: 5px; border-radius: 6px; border: 1px solid #444b66; background: #11141d; color: var(--text); }
+  .msg { height: 26px; margin-top: 12px; font-size: 18px; font-weight: 600; text-align: center; }
+  .help { margin-top: 10px; font-size: 13px; opacity: .65; text-align: center; max-width: 520px; line-height: 1.5; }
+  .best { font-size: 13px; opacity: .8; margin-top: 4px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>💣 Сапёр</h1>
+
+  <div class="controls">
+    <button class="level active" data-level="easy">Новичок</button>
+    <button class="level" data-level="medium">Любитель</button>
+    <button class="level" data-level="hard">Профи</button>
+    <button class="level" data-level="custom">Свой</button>
+  </div>
+
+  <div class="custom" id="customBox">
+    Ширина <input type="number" id="cw" min="5" max="50" value="20">
+    Высота <input type="number" id="ch" min="5" max="30" value="15">
+    Мины <input type="number" id="cm" min="1" value="50">
+    <button class="level" id="customGo">Старт</button>
+  </div>
+
+  <div class="game">
+    <div class="status">
+      <div class="counter" id="mines">010</div>
+      <button id="face" title="Новая игра">🙂</button>
+      <div class="counter" id="timer">000</div>
+    </div>
+    <div class="board-wrap"><div id="board"></div></div>
+  </div>
+
+  <div class="msg" id="msg"></div>
+  <div class="best" id="best"></div>
+  <div class="help">
+    ЛКМ — открыть клетку · ПКМ — флажок · Клик по открытой цифре (или обе кнопки / СКМ) — открыть соседей, если флажков достаточно.<br>
+    На телефоне: тап — открыть, долгое нажатие — флажок. Клавиша <b>R</b> или F2 — новая игра.
+  </div>
+
+<script>
+(() => {
+  const LEVELS = {
+    easy:   { w: 9,  h: 9,  m: 10 },
+    medium: { w: 16, h: 16, m: 40 },
+    hard:   { w: 30, h: 16, m: 99 },
+  };
+
+  const boardEl = document.getElementById('board');
+  const minesEl = document.getElementById('mines');
+  const timerEl = document.getElementById('timer');
+  const faceEl  = document.getElementById('face');
+  const msgEl   = document.getElementById('msg');
+  const bestEl  = document.getElementById('best');
+  const customBox = document.getElementById('customBox');
+
+  let W, H, M, levelKey = 'easy';
+  let grid, cells, started, over, opened, flags, timer, seconds;
+
+  const idx = (x, y) => y * W + x;
+  const pad = n => {
+    const s = String(Math.abs(Math.min(999, n))).padStart(3, '0');
+    return n < 0 ? '-' + s.slice(1) : s;
+  };
+
+  function neighbors(i) {
+    const x = i % W, y = (i / W) | 0, res = [];
+    for (let dy = -1; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < W && ny >= 0 && ny < H) res.push(idx(nx, ny));
+      }
+    return res;
+  }
+
+  function fitSize() {
+    const avail = Math.min(window.innerWidth - 60, 1000);
+    const size = Math.max(22, Math.min(34, Math.floor(avail / W) - 2));
+    document.documentElement.style.setProperty('--size', size + 'px');
+  }
+
+  function newGame(cfg) {
+    if (cfg) ({ w: W, h: H, m: M } = cfg);
+    clearInterval(timer);
+    started = false; over = false; opened = 0; flags = 0; seconds = 0;
+    grid = Array.from({ length: W * H }, () => ({ mine: false, n: 0, open: false, flag: false }));
+    boardEl.style.gridTemplateColumns = `repeat(${W}, var(--size))`;
+    boardEl.innerHTML = '';
+    cells = [];
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < W * H; i++) {
+      const d = document.createElement('div');
+      d.className = 'cell';
+      d.dataset.i = i;
+      frag.appendChild(d);
+      cells.push(d);
+    }
+    boardEl.appendChild(frag);
+    fitSize();
+    faceEl.textContent = '🙂';
+    msgEl.textContent = '';
+    updateCounters();
+    showBest();
+  }
+
+  function placeMines(safe) {
+    // первый клик и его соседи — всегда без мин (если хватает места)
+    const forbidden = new Set([safe, ...neighbors(safe)]);
+    let pool = [];
+    for (let i = 0; i < W * H; i++) if (!forbidden.has(i)) pool.push(i);
+    if (pool.length < M) pool = [...Array(W * H).keys()].filter(i => i !== safe);
+    for (let k = 0; k < M; k++) {
+      const r = k + Math.floor(Math.random() * (pool.length - k));
+      [pool[k], pool[r]] = [pool[r], pool[k]];
+      grid[pool[k]].mine = true;
+    }
+    for (let i = 0; i < W * H; i++)
+      grid[i].n = neighbors(i).filter(j => grid[j].mine).length;
+  }
+
+  function startTimer() {
+    started = true;
+    timer = setInterval(() => {
+      seconds++;
+      timerEl.textContent = pad(seconds);
+    }, 1000);
+  }
+
+  function updateCounters() {
+    minesEl.textContent = pad(M - flags);
+    timerEl.textContent = pad(seconds);
+  }
+
+  function render(i) {
+    const c = grid[i], el = cells[i];
+    el.className = 'cell';
+    el.textContent = '';
+    if (c.open) {
+      el.classList.add('open');
+      if (c.mine) { el.classList.add('mine'); el.textContent = '💣'; }
+      else if (c.n) { el.classList.add('n' + c.n); el.textContent = c.n; }
+    } else if (c.flag) {
+      el.textContent = '🚩';
+    }
+  }
+
+  function open(i) {
+    if (over) return;
+    if (!started) { placeMines(i); startTimer(); }
+    const c = grid[i];
+    if (c.open || c.flag) return;
+    if (c.mine) { lose(i); return; }
+    // flood fill без рекурсии
+    const stack = [i];
+    while (stack.length) {
+      const k = stack.pop(), cc = grid[k];
+      if (cc.open || cc.flag) continue;
+      cc.open = true; opened++;
+      render(k);
+      if (cc.n === 0) for (const j of neighbors(k)) if (!grid[j].open && !grid[j].flag) stack.push(j);
+    }
+    checkWin();
+  }
+
+  function chord(i) {
+    const c = grid[i];
+    if (!c.open || !c.n || over) return;
+    const nb = neighbors(i);
+    const f = nb.filter(j => grid[j].flag).length;
+    if (f !== c.n) return;
+    for (const j of nb) if (!grid[j].flag && !grid[j].open) { open(j); if (over) return; }
+  }
+
+  function toggleFlag(i) {
+    if (over) return;
+    const c = grid[i];
+    if (c.open) return;
+    c.flag = !c.flag;
+    flags += c.flag ? 1 : -1;
+    render(i);
+    updateCounters();
+  }
+
+  function lose(i) {
+    over = true;
+    clearInterval(timer);
+    faceEl.textContent = '😵';
+    msgEl.textContent = 'Бабах! Попробуйте ещё раз.';
+    for (let k = 0; k < W * H; k++) {
+      const c = grid[k];
+      if (c.mine && !c.flag) { c.open = true; render(k); }
+      else if (!c.mine && c.flag) { cells[k].classList.add('wrong'); cells[k].textContent = '❌'; }
+    }
+    cells[i].classList.add('boom');
+  }
+
+  function checkWin() {
+    if (over || opened !== W * H - M) return;
+    over = true;
+    clearInterval(timer);
+    faceEl.textContent = '😎';
+    for (let k = 0; k < W * H; k++)
+      if (grid[k].mine && !grid[k].flag) { grid[k].flag = true; render(k); }
+    flags = M; updateCounters();
+    let text = `Победа! Время: ${seconds} с.`;
+    if (levelKey !== 'custom') {
+      const key = 'minesweeper-best-' + levelKey;
+      const prev = +localStorage.getItem(key) || Infinity;
+      if (seconds < prev) { localStorage.setItem(key, seconds); text += ' Новый рекорд! 🏆'; }
+    }
+    msgEl.textContent = text;
+    showBest();
+  }
+
+  function showBest() {
+    if (levelKey === 'custom') { bestEl.textContent = ''; return; }
+    let b = null;
+    try { b = localStorage.getItem('minesweeper-best-' + levelKey); } catch (e) {}
+    bestEl.textContent = b ? `Рекорд: ${b} с` : '';
+  }
+
+  // ===== Ввод: мышь =====
+  let buttons = 0, chordArmed = false;
+
+  boardEl.addEventListener('contextmenu', e => e.preventDefault());
+
+  boardEl.addEventListener('mousedown', e => {
+    const el = e.target.closest('.cell');
+    if (!el || over) return;
+    buttons = e.buttons;
+    if (!over) faceEl.textContent = '😮';
+    if ((buttons & 3) === 3 || e.button === 1) chordArmed = true;
+    if (e.button === 2 && !chordArmed) toggleFlag(+el.dataset.i);
+  });
+
+  document.addEventListener('mouseup', e => {
+    if (!over) faceEl.textContent = '🙂';
+    const el = e.target.closest && e.target.closest('.cell');
+    if (!el || !boardEl.contains(el)) { if (!e.buttons) chordArmed = false; return; }
+    const i = +el.dataset.i;
+    if (chordArmed) {
+      if (!e.buttons) { chordArmed = false; chord(i); }
+      return;
+    }
+    if (e.button === 0) {
+      if (grid[i].open) chord(i); else open(i);
+    }
+  });
+
+  // ===== Ввод: тач (долгое нажатие = флажок) =====
+  let touchTimer = null, touchCell = null, longPressed = false, touchMoved = false;
+
+  boardEl.addEventListener('touchstart', e => {
+    const el = e.target.closest('.cell');
+    if (!el || over) return;
+    touchCell = +el.dataset.i; longPressed = false; touchMoved = false;
+    touchTimer = setTimeout(() => {
+      longPressed = true;
+      toggleFlag(touchCell);
+      if (navigator.vibrate) navigator.vibrate(30);
+    }, 400);
+  }, { passive: true });
+
+  boardEl.addEventListener('touchmove', () => { touchMoved = true; clearTimeout(touchTimer); }, { passive: true });
+
+  boardEl.addEventListener('touchend', e => {
+    clearTimeout(touchTimer);
+    if (touchCell === null) return;
+    e.preventDefault(); // не генерировать mouse-события
+    if (!longPressed && !touchMoved) {
+      if (grid[touchCell].open) chord(touchCell); else open(touchCell);
+    }
+    touchCell = null;
+  });
+
+  // ===== Управление =====
+  faceEl.addEventListener('click', () => newGame());
+
+  document.querySelectorAll('.controls .level').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.controls .level').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      levelKey = btn.dataset.level;
+      if (levelKey === 'custom') { customBox.classList.add('show'); startCustom(); }
+      else { customBox.classList.remove('show'); newGame(LEVELS[levelKey]); }
+    });
+  });
+
+  function startCustom() {
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v | 0));
+    const w = clamp(+document.getElementById('cw').value, 5, 50);
+    const h = clamp(+document.getElementById('ch').value, 5, 30);
+    const m = clamp(+document.getElementById('cm').value, 1, w * h - 1);
+    document.getElementById('cw').value = w;
+    document.getElementById('ch').value = h;
+    document.getElementById('cm').value = m;
+    newGame({ w, h, m });
+  }
+  document.getElementById('customGo').addEventListener('click', startCustom);
+
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К' || e.key === 'F2') {
+      e.preventDefault(); newGame();
+    }
+  });
+
+  window.addEventListener('resize', fitSize);
+
+  newGame(LEVELS.easy);
+})();
+</script>
+</body>
+</html>

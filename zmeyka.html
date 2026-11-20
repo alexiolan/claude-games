@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Змейка</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #1b1f2a; color: #e8eaf0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    user-select: none; touch-action: none;
+  }
+  h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: 1px; }
+  .bar { display: flex; gap: 24px; margin-bottom: 10px; font-size: 18px; }
+  .bar b { color: #7ee787; }
+  .wrap { position: relative; }
+  canvas {
+    display: block; background: #11141c; border-radius: 10px;
+    box-shadow: 0 0 0 2px #2c3345, 0 10px 30px rgba(0,0,0,.5);
+    max-width: 92vw; max-height: 70vh; width: 480px; height: 480px;
+  }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; text-align: center;
+    background: rgba(17,20,28,.82); border-radius: 10px; padding: 16px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { margin: 0 0 10px; font-size: 26px; }
+  .overlay p { margin: 4px 0; color: #aab1c3; }
+  button {
+    margin-top: 14px; padding: 10px 22px; font-size: 16px; border: 0; border-radius: 8px;
+    background: #2ea043; color: #fff; cursor: pointer;
+  }
+  button:hover { background: #3fb950; }
+  .help { margin-top: 10px; color: #7d8599; font-size: 14px; text-align: center; }
+  .pad { display: none; margin-top: 12px; grid-template-columns: repeat(3, 56px); gap: 6px; }
+  .pad button { margin: 0; padding: 0; height: 56px; font-size: 22px; background: #2c3345; }
+  .pad button:active { background: #3b4560; }
+  @media (pointer: coarse) { .pad { display: grid; } }
+</style>
+</head>
+<body>
+  <h1>🐍 Змейка</h1>
+  <div class="bar">
+    <div>Счёт: <b id="score">0</b></div>
+    <div>Рекорд: <b id="best">0</b></div>
+  </div>
+  <div class="wrap">
+    <canvas id="game" width="480" height="480"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle">Змейка</h2>
+      <p id="ovText">Собирай яблоки и не врезайся в себя и стены.</p>
+      <button id="startBtn">Играть</button>
+    </div>
+  </div>
+  <div class="help">Стрелки / WASD — движение · Пробел — пауза · Свайпы на телефоне</div>
+  <div class="pad">
+    <span></span><button data-d="up">▲</button><span></span>
+    <button data-d="left">◀</button><button data-d="pause">⏸</button><button data-d="right">▶</button>
+    <span></span><button data-d="down">▼</button><span></span>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovText = document.getElementById('ovText');
+  const startBtn = document.getElementById('startBtn');
+
+  const GRID = 20;
+  const CELL = canvas.width / GRID;
+  const DIRS = { up: {x:0,y:-1}, down: {x:0,y:1}, left: {x:-1,y:0}, right: {x:1,y:0} };
+
+  let snake, dir, queue, food, score, best, speed, state, lastTick, acc;
+
+  try { best = +localStorage.getItem('snakeBest') || 0; } catch { best = 0; }
+  bestEl.textContent = best;
+
+  function reset() {
+    const c = Math.floor(GRID / 2);
+    snake = [{x:c, y:c}, {x:c-1, y:c}, {x:c-2, y:c}];
+    dir = DIRS.right;
+    queue = [];
+    score = 0;
+    speed = 8; // клеток в секунду
+    scoreEl.textContent = 0;
+    placeFood();
+  }
+
+  function placeFood() {
+    const free = [];
+    for (let y = 0; y < GRID; y++)
+      for (let x = 0; x < GRID; x++)
+        if (!snake.some(s => s.x === x && s.y === y)) free.push({x, y});
+    food = free.length ? free[Math.floor(Math.random() * free.length)] : null;
+  }
+
+  function setDir(name) {
+    const d = DIRS[name];
+    if (!d || state !== 'play') return;
+    const last = queue.length ? queue[queue.length - 1] : dir;
+    if (d.x === -last.x && d.y === -last.y) return; // нельзя развернуться
+    if (d === last) return;
+    if (queue.length < 3) queue.push(d);
+  }
+
+  function step() {
+    if (queue.length) dir = queue.shift();
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+    const eating = food && head.x === food.x && head.y === food.y;
+    // хвост освободит клетку, если не едим
+    const body = eating ? snake : snake.slice(0, -1);
+    if (head.x < 0 || head.y < 0 || head.x >= GRID || head.y >= GRID ||
+        body.some(s => s.x === head.x && s.y === head.y)) {
+      return gameOver();
+    }
+    snake.unshift(head);
+    if (eating) {
+      score++;
+      scoreEl.textContent = score;
+      speed = Math.min(20, 8 + score * 0.25);
+      placeFood();
+      if (!food) return win();
+    } else {
+      snake.pop();
+    }
+  }
+
+  function saveBest() {
+    if (score > best) {
+      best = score;
+      bestEl.textContent = best;
+      try { localStorage.setItem('snakeBest', best); } catch {}
+    }
+  }
+
+  function gameOver() {
+    state = 'over';
+    saveBest();
+    showOverlay('Игра окончена', `Счёт: ${score}. Рекорд: ${best}.`, 'Ещё раз');
+  }
+
+  function win() {
+    state = 'over';
+    saveBest();
+    showOverlay('Победа! 🎉', `Змейка заполнила всё поле. Счёт: ${score}.`, 'Ещё раз');
+  }
+
+  function showOverlay(title, text, btn) {
+    ovTitle.textContent = title;
+    ovText.textContent = text;
+    startBtn.textContent = btn;
+    overlay.classList.remove('hidden');
+  }
+
+  function start() {
+    reset();
+    state = 'play';
+    overlay.classList.add('hidden');
+    lastTick = performance.now();
+    acc = 0;
+  }
+
+  function togglePause() {
+    if (state === 'play') {
+      state = 'pause';
+      showOverlay('Пауза', 'Нажми пробел или кнопку, чтобы продолжить.', 'Продолжить');
+    } else if (state === 'pause') {
+      state = 'play';
+      overlay.classList.add('hidden');
+      lastTick = performance.now();
+    }
+  }
+
+  // ---------- Отрисовка ----------
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#11141c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // шахматный фон
+    ctx.fillStyle = '#151924';
+    for (let y = 0; y < GRID; y++)
+      for (let x = (y % 2); x < GRID; x += 2)
+        ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+
+    // еда
+    if (food) {
+      const cx = food.x * CELL + CELL / 2, cy = food.y * CELL + CELL / 2;
+      const pulse = 1 + Math.sin(performance.now() / 150) * 0.06;
+      ctx.fillStyle = '#ff5c5c';
+      ctx.beginPath();
+      ctx.arc(cx, cy + 1, CELL * 0.38 * pulse, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#7ee787';
+      ctx.beginPath();
+      ctx.ellipse(cx + 3, cy - CELL * 0.36, 4, 2, -0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // змейка
+    const n = snake.length;
+    snake.forEach((s, i) => {
+      const t = i / Math.max(1, n - 1);
+      const g = Math.round(220 - t * 90);
+      ctx.fillStyle = i === 0 ? '#7ee787' : `rgb(46, ${g}, 80)`;
+      const pad = i === 0 ? 1 : 2;
+      roundRect(s.x * CELL + pad, s.y * CELL + pad, CELL - pad * 2, CELL - pad * 2, 6);
+      ctx.fill();
+    });
+
+    // глаза
+    const h = snake[0];
+    const hx = h.x * CELL + CELL / 2, hy = h.y * CELL + CELL / 2;
+    const px = -dir.y, py = dir.x; // перпендикуляр
+    ctx.fillStyle = '#11141c';
+    for (const side of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(hx + dir.x * 4 + px * side * 5, hy + dir.y * 4 + py * side * 5, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- Цикл ----------
+  function loop(now) {
+    if (state === 'play') {
+      acc += now - lastTick;
+      lastTick = now;
+      const interval = 1000 / speed;
+      while (acc >= interval && state === 'play') {
+        acc -= interval;
+        step();
+      }
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Управление ----------
+  const KEYS = {
+    ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', ArrowRight:'right',
+    KeyW:'up', KeyS:'down', KeyA:'left', KeyD:'right'
+  };
+  document.addEventListener('keydown', e => {
+    if (KEYS[e.code]) { e.preventDefault(); setDir(KEYS[e.code]); }
+    else if (e.code === 'Space' || e.code === 'Enter') {
+      e.preventDefault();
+      if (state === 'menu' || state === 'over') start();
+      else togglePause();
+    }
+  });
+
+  startBtn.addEventListener('click', () => {
+    if (state === 'pause') togglePause(); else start();
+    startBtn.blur();
+  });
+
+  document.querySelectorAll('.pad button').forEach(b =>
+    b.addEventListener('click', () => {
+      const d = b.dataset.d;
+      if (d === 'pause') togglePause(); else setDir(d);
+    })
+  );
+
+  let touchStart = null;
+  canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0]; touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchmove', e => {
+    if (!touchStart) return;
+    const t = e.touches[0];
+    const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+    setDir(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+    touchStart = { x: t.clientX, y: t.clientY };
+  }, { passive: true });
+  canvas.addEventListener('touchend', () => touchStart = null);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && state === 'play') togglePause();
+  });
+
+  state = 'menu';
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

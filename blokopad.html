@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Блокопад</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 30% 20%, #1d2440, #0b0e1a 70%);
+    font-family: "Segoe UI", system-ui, sans-serif; color: #e6e9f5; user-select: none;
+  }
+  .wrap { display: flex; gap: 20px; align-items: flex-start; }
+  .panel { display: flex; flex-direction: column; gap: 14px; width: 140px; }
+  .box {
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; padding: 10px; text-align: center;
+  }
+  .box h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 2px; color: #8f98c0; text-transform: uppercase; }
+  .val { font-size: 22px; font-weight: 700; }
+  #board { border-radius: 10px; border: 1px solid rgba(255,255,255,0.15); background: #0e1222; display: block; }
+  .stage { position: relative; }
+  #overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(8,10,20,0.82); border-radius: 10px; text-align: center; padding: 20px;
+  }
+  #overlay h1 { margin: 0 0 8px; font-size: 32px; background: linear-gradient(90deg,#ff7eb3,#7afcff); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  #overlay p { margin: 4px 0; color: #b5bce0; }
+  button {
+    margin-top: 14px; padding: 10px 26px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer;
+    background: linear-gradient(90deg,#ff7eb3,#a78bfa); color: #fff; font-weight: 600;
+  }
+  .keys { font-size: 12px; color: #8f98c0; line-height: 1.7; text-align: left; }
+  kbd { background: rgba(255,255,255,0.1); border-radius: 4px; padding: 1px 5px; font-family: inherit; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel">
+    <div class="box"><h3>Запас</h3><canvas id="hold" width="110" height="80"></canvas></div>
+    <div class="box"><h3>Очки</h3><div class="val" id="score">0</div></div>
+    <div class="box"><h3>Линии</h3><div class="val" id="lines">0</div></div>
+    <div class="box"><h3>Уровень</h3><div class="val" id="level">1</div></div>
+    <div class="box"><h3>Рекорд</h3><div class="val" id="best">0</div></div>
+  </div>
+  <div class="stage">
+    <canvas id="board" width="300" height="600"></canvas>
+    <div id="overlay">
+      <h1>Блокопад</h1>
+      <p id="msg">Собирай ряды — они исчезают</p>
+      <button id="startBtn">Играть</button>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="box"><h3>Далее</h3><canvas id="next" width="110" height="250"></canvas></div>
+    <div class="box keys">
+      <kbd>←</kbd> <kbd>→</kbd> движение<br>
+      <kbd>↓</kbd> ускорить<br>
+      <kbd>↑</kbd> / <kbd>X</kbd> поворот<br>
+      <kbd>Z</kbd> поворот назад<br>
+      <kbd>Пробел</kbd> сброс<br>
+      <kbd>C</kbd> запас<br>
+      <kbd>P</kbd> / <kbd>Esc</kbd> пауза
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const COLS = 10, ROWS = 20, SZ = 30, HIDDEN = 2;
+  const board = document.getElementById('board'), ctx = board.getContext('2d');
+  const nextCtx = document.getElementById('next').getContext('2d');
+  const holdCtx = document.getElementById('hold').getContext('2d');
+  const overlay = document.getElementById('overlay'), msg = document.getElementById('msg');
+  const startBtn = document.getElementById('startBtn');
+  const $ = id => document.getElementById(id);
+
+  // Фигуры и собственная палитра
+  const SHAPES = {
+    I: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+    O: [[1,1],[1,1]],
+    T: [[0,1,0],[1,1,1],[0,0,0]],
+    S: [[0,1,1],[1,1,0],[0,0,0]],
+    Z: [[1,1,0],[0,1,1],[0,0,0]],
+    J: [[1,0,0],[1,1,1],[0,0,0]],
+    L: [[0,0,1],[1,1,1],[0,0,0]],
+  };
+  const COLORS = { I:'#5eead4', O:'#fcd34d', T:'#c084fc', S:'#86efac', Z:'#fb7185', J:'#60a5fa', L:'#fdba74' };
+
+  // Смещения при повороте (SRS-подобные)
+  const KICKS = {
+    '0>1': [[0,0],[-1,0],[-1,-1],[0,2],[-1,2]], '1>0': [[0,0],[1,0],[1,1],[0,-2],[1,-2]],
+    '1>2': [[0,0],[1,0],[1,1],[0,-2],[1,-2]],   '2>1': [[0,0],[-1,0],[-1,-1],[0,2],[-1,2]],
+    '2>3': [[0,0],[1,0],[1,-1],[0,2],[1,2]],    '3>2': [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],
+    '3>0': [[0,0],[-1,0],[-1,1],[0,-2],[-1,-2]],'0>3': [[0,0],[1,0],[1,-1],[0,2],[1,2]],
+  };
+  const KICKS_I = {
+    '0>1': [[0,0],[-2,0],[1,0],[-2,1],[1,-2]], '1>0': [[0,0],[2,0],[-1,0],[2,-1],[-1,2]],
+    '1>2': [[0,0],[-1,0],[2,0],[-1,-2],[2,1]], '2>1': [[0,0],[1,0],[-2,0],[1,2],[-2,-1]],
+    '2>3': [[0,0],[2,0],[-1,0],[2,-1],[-1,2]], '3>2': [[0,0],[-2,0],[1,0],[-2,1],[1,-2]],
+    '3>0': [[0,0],[1,0],[-2,0],[1,2],[-2,-1]], '0>3': [[0,0],[-1,0],[2,0],[-1,-2],[2,1]],
+  };
+
+  let grid, cur, queue, bag, holdType, canHold, score, lines, level, best;
+  let dropTimer, lockTimer, lockMoves, running = false, paused = false, over = false, lastTime = 0;
+  let flashRows = [], flashTime = 0;
+  best = +(localStorage.getItem('blockfall-best') || 0);
+  $('best').textContent = best;
+
+  const emptyGrid = () => Array.from({length: ROWS + HIDDEN}, () => Array(COLS).fill(null));
+
+  function nextFromBag() {
+    if (!bag.length) {
+      bag = Object.keys(SHAPES);
+      for (let i = bag.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [bag[i], bag[j]] = [bag[j], bag[i]]; }
+    }
+    return bag.pop();
+  }
+
+  function makePiece(type) {
+    const m = SHAPES[type].map(r => r.slice());
+    return { type, m, rot: 0, x: Math.floor((COLS - m[0].length) / 2), y: type === 'I' ? 1 : 0 };
+  }
+
+  function rotateMatrix(m, dir) {
+    const n = m.length, r = Array.from({length: n}, () => Array(n).fill(0));
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++)
+      if (dir > 0) r[x][n - 1 - y] = m[y][x]; else r[n - 1 - x][y] = m[y][x];
+    return r;
+  }
+
+  function collides(m, px, py) {
+    for (let y = 0; y < m.length; y++) for (let x = 0; x < m[y].length; x++) {
+      if (!m[y][x]) continue;
+      const gx = px + x, gy = py + y;
+      if (gx < 0 || gx >= COLS || gy >= ROWS + HIDDEN) return true;
+      if (gy >= 0 && grid[gy][gx]) return true;
+    }
+    return false;
+  }
+
+  function spawn(type) {
+    cur = makePiece(type || queue.shift());
+    if (!type) queue.push(nextFromBag());
+    lockTimer = 0; lockMoves = 0; canHold = canHold ?? true;
+    if (collides(cur.m, cur.x, cur.y)) gameOver();
+  }
+
+  function touchingGround() { return collides(cur.m, cur.x, cur.y + 1); }
+
+  function onMoved() {
+    if (touchingGround() && lockMoves < 15) { lockTimer = 0; lockMoves++; }
+  }
+
+  function move(dx) {
+    if (!collides(cur.m, cur.x + dx, cur.y)) { cur.x += dx; onMoved(); return true; }
+    return false;
+  }
+
+  function rotate(dir) {
+    if (cur.type === 'O') return;
+    const nm = rotateMatrix(cur.m, dir), from = cur.rot, to = (cur.rot + (dir > 0 ? 1 : 3)) % 4;
+    const kicks = (cur.type === 'I' ? KICKS_I : KICKS)[from + '>' + to];
+    for (const [kx, ky] of kicks) {
+      if (!collides(nm, cur.x + kx, cur.y - ky)) {
+        cur.m = nm; cur.x += kx; cur.y -= ky; cur.rot = to; onMoved(); return;
+      }
+    }
+  }
+
+  function softDrop() {
+    if (!collides(cur.m, cur.x, cur.y + 1)) { cur.y++; score += 1; dropTimer = 0; updateHUD(); return true; }
+    return false;
+  }
+
+  function hardDrop() {
+    let d = 0;
+    while (!collides(cur.m, cur.x, cur.y + 1)) { cur.y++; d++; }
+    score += d * 2;
+    lock();
+  }
+
+  function hold() {
+    if (!canHold) return;
+    const t = cur.type;
+    if (holdType) { const h = holdType; holdType = t; spawn(h); }
+    else { holdType = t; spawn(); }
+    canHold = false;
+  }
+
+  function lock() {
+    let allHidden = true;
+    cur.m.forEach((row, y) => row.forEach((v, x) => {
+      if (!v) return;
+      const gy = cur.y + y;
+      if (gy >= 0) grid[gy][cur.x + x] = cur.type;
+      if (gy >= HIDDEN) allHidden = false;
+    }));
+    if (allHidden) { gameOver(); return; }
+
+    const full = [];
+    for (let y = 0; y < ROWS + HIDDEN; y++) if (grid[y].every(c => c)) full.push(y);
+    if (full.length) {
+      flashRows = full; flashTime = 180;
+      const pts = [0, 100, 300, 500, 800][full.length] * level;
+      score += pts; lines += full.length;
+      level = Math.floor(lines / 10) + 1;
+    }
+    canHold = true;
+    updateHUD();
+    if (!full.length) spawn();
+  }
+
+  function clearFlashed() {
+    for (const y of flashRows) { grid.splice(y, 1); grid.unshift(Array(COLS).fill(null)); }
+    flashRows = [];
+    spawn();
+  }
+
+  function speed() { return Math.max(50, 1000 * Math.pow(0.8 - (level - 1) * 0.007, level - 1)); }
+
+  function updateHUD() {
+    $('score').textContent = score; $('lines').textContent = lines; $('level').textContent = level;
+    if (score > best) { best = score; $('best').textContent = best; localStorage.setItem('blockfall-best', best); }
+  }
+
+  // ---------- Отрисовка ----------
+  function cell(c, x, y, color, size, alpha = 1) {
+    c.globalAlpha = alpha;
+    const g = c.createLinearGradient(x, y, x + size, y + size);
+    g.addColorStop(0, color); g.addColorStop(1, shade(color, -35));
+    c.fillStyle = g;
+    roundRect(c, x + 1, y + 1, size - 2, size - 2, size * 0.18); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.25)';
+    roundRect(c, x + 4, y + 3, size - 8, size * 0.22, 3); c.fill();
+    c.globalAlpha = 1;
+  }
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+  }
+  function shade(hex, p) {
+    const n = parseInt(hex.slice(1), 16);
+    const f = v => Math.max(0, Math.min(255, v + p));
+    return `rgb(${f(n >> 16)},${f((n >> 8) & 255)},${f(n & 255)})`;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, board.width, board.height);
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    for (let x = 1; x < COLS; x++) { ctx.beginPath(); ctx.moveTo(x * SZ, 0); ctx.lineTo(x * SZ, ROWS * SZ); ctx.stroke(); }
+    for (let y = 1; y < ROWS; y++) { ctx.beginPath(); ctx.moveTo(0, y * SZ); ctx.lineTo(COLS * SZ, y * SZ); ctx.stroke(); }
+
+    for (let y = HIDDEN; y < ROWS + HIDDEN; y++) for (let x = 0; x < COLS; x++) {
+      const t = grid[y][x];
+      if (!t) continue;
+      if (flashRows.includes(y)) {
+        ctx.fillStyle = `rgba(255,255,255,${0.4 + 0.6 * (flashTime / 180)})`;
+        ctx.fillRect(x * SZ, (y - HIDDEN) * SZ, SZ, SZ);
+      } else cell(ctx, x * SZ, (y - HIDDEN) * SZ, COLORS[t], SZ);
+    }
+
+    if (cur && !flashRows.length && !over) {
+      let gy = cur.y;
+      while (!collides(cur.m, cur.x, gy + 1)) gy++;
+      cur.m.forEach((row, y) => row.forEach((v, x) => {
+        if (!v) return;
+        const py = gy + y - HIDDEN;
+        if (py >= 0) {
+          ctx.strokeStyle = COLORS[cur.type]; ctx.globalAlpha = 0.5; ctx.lineWidth = 2;
+          roundRect(ctx, (cur.x + x) * SZ + 3, py * SZ + 3, SZ - 6, SZ - 6, 4); ctx.stroke();
+          ctx.globalAlpha = 1; ctx.lineWidth = 1;
+        }
+      }));
+      cur.m.forEach((row, y) => row.forEach((v, x) => {
+        const py = cur.y + y - HIDDEN;
+        if (v && py >= 0) cell(ctx, (cur.x + x) * SZ, py * SZ, COLORS[cur.type], SZ);
+      }));
+    }
+    drawPreview();
+  }
+
+  function drawMini(c, type, cx, cy, s, alpha = 1) {
+    const m = SHAPES[type];
+    let minX = 9, maxX = -1, minY = 9, maxY = -1;
+    m.forEach((r, y) => r.forEach((v, x) => { if (v) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y); } }));
+    const w = (maxX - minX + 1) * s, h = (maxY - minY + 1) * s;
+    m.forEach((r, y) => r.forEach((v, x) => {
+      if (v) cell(c, cx - w / 2 + (x - minX) * s, cy - h / 2 + (y - minY) * s, COLORS[type], s, alpha);
+    }));
+  }
+
+  function drawPreview() {
+    nextCtx.clearRect(0, 0, 110, 250);
+    queue.slice(0, 4).forEach((t, i) => drawMini(nextCtx, t, 55, 32 + i * 62, i === 0 ? 22 : 18));
+    holdCtx.clearRect(0, 0, 110, 80);
+    if (holdType) drawMini(holdCtx, holdType, 55, 40, 22, canHold ? 1 : 0.35);
+  }
+
+  // ---------- Цикл ----------
+  function loop(t) {
+    if (!running) return;
+    const dt = Math.min(t - lastTime, 100); lastTime = t;
+    if (!paused && !over) {
+      if (flashRows.length) {
+        flashTime -= dt;
+        if (flashTime <= 0) clearFlashed();
+      } else {
+        handleRepeat(dt);
+        if (touchingGround()) {
+          lockTimer += dt;
+          if (lockTimer >= 500) lock();
+        } else {
+          dropTimer += dt;
+          const interval = keys.ArrowDown ? Math.min(speed(), 40) : speed();
+          if (dropTimer >= interval) {
+            dropTimer = 0;
+            if (keys.ArrowDown) softDrop(); else cur.y++;
+            lockTimer = 0;
+          }
+        }
+      }
+    }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // Автоповтор для стрелок
+  const keys = {};
+  const DAS = 160, ARR = 45;
+  let repeat = { dir: 0, t: 0, charged: false };
+  function handleRepeat(dt) {
+    if (!repeat.dir) return;
+    repeat.t += dt;
+    if (!repeat.charged) { if (repeat.t >= DAS) { repeat.charged = true; repeat.t = 0; move(repeat.dir); } }
+    else while (repeat.t >= ARR) { repeat.t -= ARR; if (!move(repeat.dir)) break; }
+  }
+
+  document.addEventListener('keydown', e => {
+    if (['ArrowLeft','ArrowRight','ArrowDown','ArrowUp','Space'].includes(e.code)) e.preventDefault();
+    if (!running) { if (e.code === 'Enter' || e.code === 'Space') start(); return; }
+    if (over) { if (e.code === 'Enter') start(); return; }
+    if (e.code === 'KeyP' || e.code === 'Escape') { togglePause(); return; }
+    if (paused || flashRows.length || e.repeat && e.code !== 'ArrowDown') return;
+    keys[e.code] = true;
+    switch (e.code) {
+      case 'ArrowLeft': move(-1); repeat = { dir: -1, t: 0, charged: false }; break;
+      case 'ArrowRight': move(1); repeat = { dir: 1, t: 0, charged: false }; break;
+      case 'ArrowDown': if (!e.repeat) { softDrop(); } break;
+      case 'ArrowUp': case 'KeyX': rotate(1); break;
+      case 'KeyZ': case 'ControlLeft': rotate(-1); break;
+      case 'Space': hardDrop(); break;
+      case 'KeyC': case 'ShiftLeft': hold(); break;
+    }
+  });
+  document.addEventListener('keyup', e => {
+    keys[e.code] = false;
+    if ((e.code === 'ArrowLeft' && repeat.dir === -1) || (e.code === 'ArrowRight' && repeat.dir === 1)) {
+      const other = e.code === 'ArrowLeft' ? 'ArrowRight' : 'ArrowLeft';
+      repeat = keys[other] ? { dir: -repeat.dir, t: 0, charged: false } : { dir: 0, t: 0, charged: false };
+    }
+  });
+  window.addEventListener('blur', () => { if (running && !over && !paused) togglePause(); });
+
+  function togglePause() {
+    paused = !paused;
+    if (paused) showOverlay('Пауза', 'Нажми P, чтобы продолжить', 'Продолжить');
+    else { overlay.classList.add('hidden'); for (const k in keys) keys[k] = false; repeat.dir = 0; }
+  }
+
+  function showOverlay(title, text, btn) {
+    overlay.querySelector('h1').textContent = title;
+    msg.innerHTML = text; startBtn.textContent = btn;
+    overlay.classList.remove('hidden');
+  }
+
+  function gameOver() {
+    over = true;
+    showOverlay('Конец игры', `Очки: <b>${score}</b><br>Линии: ${lines} · Уровень: ${level}`, 'Ещё раз');
+  }
+
+  function start() {
+    grid = emptyGrid(); bag = []; queue = []; holdType = null; canHold = true;
+    for (let i = 0; i < 5; i++) queue.push(nextFromBag());
+    score = 0; lines = 0; level = 1; dropTimer = 0; flashRows = [];
+    over = false; paused = false;
+    for (const k in keys) keys[k] = false; repeat = { dir: 0, t: 0, charged: false };
+    spawn(); updateHUD();
+    overlay.classList.add('hidden');
+    if (!running) { running = true; lastTime = performance.now(); requestAnimationFrame(loop); }
+  }
+
+  startBtn.addEventListener('click', () => { startBtn.blur(); paused ? togglePause() : start(); });
+
+  // Начальная отрисовка пустого поля
+  grid = emptyGrid(); queue = []; draw();
+})();
+</script>
+</body>
+</html>
